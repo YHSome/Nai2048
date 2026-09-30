@@ -1,0 +1,23 @@
+﻿# 编辑器 / 系统垃圾
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+
+# 依赖 / 构建（这个项目本来零依赖，留着以防万一）
+node_modules/
+package-lock.json
+dist/
+build/
+
+# 临时文件（我调试宣传片时用的探针页）
+*.tmp.*
+_*.tmp.html
+
+# 参考样例是单独一个仓库（github.com/YHSome/BigNaiWa），不并进来
+BigNaiWa/
+
+# 宣传片（8 版 30 秒）暂时只放在本地，不跟着上仓库
+video/
