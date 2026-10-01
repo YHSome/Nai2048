@@ -480,10 +480,59 @@ check('一直静不下来也会超时放行，不会软锁', S.locked === false 
 check('快进有上限，不会无限算下去', S.ffSteps <= Math.ceil(N.FASTFWD_MAX_SEC * 60),
       '最多快进 ' + S.ffSteps + ' 步（上限 ' + Math.ceil(N.FASTFWD_MAX_SEC * 60) + '）');
 
-/* 7i. 结算那一刻，场上必须真的全停了
-   （曾经有个 bug：滑动后 rest 还残留着 true，下一帧就把新一批冒出来了，
-     实测结算时平均有 8.9 只还在动） */
-console.log('[7i] 新一批必须等“真的全停下”才出现');
+/* ---- 7j. 下一批的「虚像」：下落期间就出现，落地时原地变实体 ---- */
+console.log('[7j] 下落期间下一批以虚像出现');
+N.reset();
+clear();
+for (let i = 0; i < 5; i++) {
+  const b = ball(120 + i * 70, 180, i % 3);
+  b.vy = 300;
+  S.balls.push(b);
+}
+N.applySwipe('down');
+const gh = S.ghost;
+check('滑完立刻就有虚像', gh.length === N.SPAWN_PER_TURN, '虚像 ' + gh.length + ' 只');
+check('虚像的等级 = 「下一个」面板里那三只',
+      gh.every((g, i) => g.tier === S.nextBatch[i]),
+      '虚像 ' + gh.map(g => N.FROGS[g.tier].v).join('/') + ' vs 面板 ' + S.nextBatch.map(t => N.FROGS[t].v).join('/'));
+check('虚像落在重力来的那一侧（向下 → 上方那条带）',
+      gh.every(g => g.y < N.H * 0.45), 'y = ' + gh.map(g => Math.round(g.y)).join(', '));
+check('虚像彼此不叠在一起', gh.every((g, i) => gh.every((h, j) =>
+      i === j || Math.hypot(h.x - g.x, h.y - g.y) > g.rb + h.rb - 2)),
+      gh.map(g => '(' + Math.round(g.x) + ',' + Math.round(g.y) + ')').join(' '));
+check('虚像不算进场上（不参与碰撞 / 拥挤度）', S.balls.filter(b => !b.dead).length === 5,
+      '场上 ' + S.balls.length + ' 只');
+
+/* 下落过程中虚像一直都在 */
+frames(30);
+check('奶蛙还在下落时虚像还在', S.ghost.length === N.SPAWN_PER_TURN && S.locked === true,
+      'ghost=' + S.ghost.length + '，locked=' + S.locked);
+
+/* 整池静止 → 就地变实体：位置必须一模一样 */
+const ghostPos = S.ghost.map(g => ({ x: g.x, y: g.y, tier: g.tier }));
+let t7j = 0;
+while (S.spawnCount === 0 && t7j < 15 * 60) { update(1 / 60); t7j++; }
+check('整池静止后就地变实体（位置和虚像完全一致）',
+      ghostPos.every(g => S.balls.some(b => Math.abs(b.x - g.x) < 0.001 && Math.abs(b.y - g.y) < 0.001)),
+      '冒出的那 ' + S.spawnCount + ' 只都在虚像的位置上');
+check('虚像随即消失（不会再叠一层）', S.ghost.length === 0);
+
+/* 渲染虚像不能报错（宣传片会关掉数字牌，这里两种都试） */
+const drewGhost = [];
+let ghostThrew = false;
+try {
+  N.applySwipe('up');
+  S.warp = 1;
+  N.render(1 / 60);
+  N.applySwipe('left');
+  S.showBadge = false;
+  N.render(1 / 60);
+  N.showBadge = true;
+} catch (e) { ghostThrew = true; }
+S.showBadge = true;
+check('画虚像（含刚滑完的淡入）不报错', ghostThrew === false);
+
+/* ---- 7i. 新一批必须等“真的全停下”才出现 ---- */
 N.reset();
 clear();
 for (let i = 0; i < 6; i++) {

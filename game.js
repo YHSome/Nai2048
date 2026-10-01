@@ -321,6 +321,8 @@
     dir: null,                 // null = 漂浮（不受重力）
     gx: 0, gy: 0,              // 当前重力向量
     nextBatch: [],             // 下一批要出现的等级（一次 SPAWN_PER_TURN 只）
+    ghost: [],                 // 下一批奶蛙的「虚像」：下落期间先按将要落地的地方半透明画出来
+    ghostAt: 0,
     owed: 0,                   // 还欠几批没结算（滑动 +1，整池静止后结算掉一批）
     settleTimer: 0,            // 连续静止了多久
     moveTime: 0,               // 连续“还在动”了多久
@@ -811,6 +813,8 @@
        但必须把「已经停下来了」这个状态立刻抹掉：滑动这一刻奶蛙正要被甩出去，
        残留的 rest=true 会让下一帧就误判成“静止”，新的一批会当场冒出来。 */
     if (state.owed < MAX_OWED) state.owed++;
+    /* 让这一批马上以「虚像」出现在它将要落地的地方：整池还在下落的时候就能看见它们 */
+    previewSpawn();
     state.rest = false;
     state.settleTimer = 0;
     state.moveTime = 0;
@@ -841,7 +845,7 @@
 
   /* 找一个空位：优先“上风侧”的一条带（重力反方向），漂浮时在池子中间随机
      gap：和已有奶蛙至少留出的间距（开局要留大一点，别让它们漂着漂着就贴上了） */
-  function findSpot(tier, dir, gap) {
+  function findSpot(tier, dir, gap, extra) {
     const rb = shapeOf(tier).rb * FROGS[tier].r;
     if (gap === undefined) gap = 6;
     let best = null, bestGap = -1e9;
@@ -874,17 +878,47 @@
         const g = hypot2(b.x - x, b.y - y) - (rb + b.rb);
         if (g < minGap) minGap = g;
       }
+      /* 同一批里前面的那几只也要算进去，免得虚像叠在一起 */
+      if (extra) {
+        for (let k = 0; k < extra.length; k++) {
+          const e = extra[k];
+          const g = hypot2(e.x - x, e.y - y) - (rb + e.rb);
+          if (g < minGap) minGap = g;
+        }
+      }
       if (minGap > gap) return { x, y };
       if (minGap > bestGap) { bestGap = minGap; best = { x, y }; }
     }
     return best;
   }
 
-  function spawnFrog(tier) {
+  /* 这一批奶蛙的「虚像」：滑动之后整池还在下落时，先把它们按将要出现的位置画成半透明的；
+     等整池静止（deliverSpawn）时就地变成实体 —— 位置只算一次、存下来复用，
+     所以虚像和真身一定在同一个地方，不会“跳”一下。 */
+  function previewSpawn() {
+    state.ghost.length = 0;
+    if (!state.dir) return;                    // 开局没有重力，谈不上“下一批从哪边来”
+    if (!state.nextBatch.length) refillNextBatch();
+    if (!state.nextBatch.length) return;
+
+    const taken = [];
+    for (let i = 0; i < state.nextBatch.length; i++) {
+      const tier = state.nextBatch[i];
+      /* 每只依次多要一点间距，免得三只虚像挤在一起 */
+      const spot = findSpot(tier, state.dir, 6 + i * 10, taken);
+      if (!spot) continue;
+      const rb = shapeOf(tier).rb * FROGS[tier].r;
+      taken.push({ x: spot.x, y: spot.y, rb: rb });
+      state.ghost.push({ tier: tier, x: spot.x, y: spot.y, rb: rb });
+    }
+    state.ghostAt = performance.now();
+  }
+
+  function spawnFrog(tier, spot) {
     if (tier === undefined) tier = state.nextBatch[0] || 0;
-    const spot = findSpot(tier, state.dir);
-    if (!spot) return null;
-    const b = makeBall(spot.x, spot.y, tier, 0, 0);
+    const at = spot || findSpot(tier, state.dir);
+    if (!at) return null;
+    const b = makeBall(at.x, at.y, tier, 0, 0);
     b.popAt = performance.now();
     state.balls.push(b);
     state.spawnCount++;
@@ -920,7 +954,9 @@
     const batch = state.nextBatch.slice();
     const made = [];
     for (let i = 0; i < batch.length; i++) {
-      const b = spawnFrog(batch[i]);
+      /* 有虚像就照着虚像的位置落地（虚像 = 预览，位置一模一样，不会“跳”一下） */
+      const g = state.ghost[i];
+      const b = spawnFrog(batch[i], (g && g.tier === batch[i]) ? g : null);
       if (!b) continue;
       b.float = 1;                   // 刚出现的这几只都不受重力，等玩家滑一下才开始掉
       b.vx = 0;
@@ -929,6 +965,7 @@
       b.py = b.y;
       made.push(b);
     }
+    state.ghost.length = 0;          // 虚像变实体了
     refillNextBatch();
     drawNext();
     paintNextTip();
@@ -970,6 +1007,8 @@
     state.balls.length = 0;
     state.particles.length = 0;
     state.floats.length = 0;
+    state.ghost.length = 0;
+    state.ghostAt = 0;
     state.score = 0;
     state.moves = 0;
     state.dir = null;
@@ -1430,6 +1469,43 @@
     ctx.textBaseline = 'alphabetic';
   }
 
+  /* 下一批奶蛙的虚像：下落期间就摆在那儿，半透明 + 虚线环 + 淡淡的等级牌，
+     一眼看出“这仨马上要出现在这里”。等整池静止，它们就地变成实体。 */
+  function drawGhosts() {
+    if (!state.ghost.length) return;
+    const now = performance.now();
+
+    for (let i = 0; i < state.ghost.length; i++) {
+      const g = state.ghost[i];
+      const r = FROGS[g.tier].r;
+      const pulse = 0.5 + 0.5 * Math.sin(now / 420 + i * 1.1);
+      /* 刚滑完那一下从 0 淡入，别“啪”地冒出来 */
+      const inK = state.ghostAt ? Math.min(1, (now - state.ghostAt) / 260) : 1;
+
+      ctx.save();
+      ctx.globalAlpha = inK * (0.20 + 0.10 * pulse);
+      drawFrog(ctx, g.x, g.y, r, g.tier, 0, 1, null);
+      ctx.restore();
+
+      ctx.save();
+      ctx.globalAlpha = inK * (0.28 + 0.18 * pulse);
+      ctx.setLineDash([5, 6]);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = '#3ba97f';
+      ctx.beginPath();
+      ctx.arc(g.x, g.y, g.rb + 8, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+
+      if (state.showBadge) {
+        ctx.save();
+        ctx.globalAlpha = inK * (0.30 + 0.16 * pulse);
+        drawBadge(ctx, g.x, g.y, r, FROGS[g.tier].v);
+        ctx.restore();
+      }
+    }
+  }
+
   function drawFrogs() {
     const now = performance.now();
     const sorted = state.balls.slice().sort((a, b) => a.r - b.r);
@@ -1730,6 +1806,7 @@
     }
 
     drawBoard();
+    drawGhosts();
     drawFrogs();
     drawWarp();
     drawArrowFlash(dt);
@@ -1878,7 +1955,7 @@
   /* 调试句柄：__NW__.state / .reset() / .applySwipe('up') / .FROGS / .spawnFrog(3) */
   window.__NW__ = {
     state, reset, applySwipe, stepPhysics, makeBall, spawnFrog, dealInitial,
-    simulate, fastForwardToRest, INSTANT_INPUT, FASTFWD_MAX_SEC,
+    simulate, fastForwardToRest, previewSpawn, INSTANT_INPUT, FASTFWD_MAX_SEC,
     Sound,                        // 宣传片录制页会把它静音，免得游戏音效和震动混进来
     FROGS, DIRS, coverageOf, coverageAll, checkJam, W, H, WALL,
     INIT_FROGS, MAX_TIER, MAX_BONUS, JAM_COV, JAM_LIMIT, FRICTION, CONTACT_PAD,
