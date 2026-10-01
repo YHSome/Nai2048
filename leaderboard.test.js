@@ -192,7 +192,7 @@ function seed(name, score, i, opts) {
   Board.onGameOver(0);
   eq(els.submitBox.style.display, 'none', '0 分时结算区直接隐藏（不提交）');
 
-  console.log('\n[9] 抗 502：第一次失败会自动重试一次');
+  console.log('\n[9] 抗 502：失败会退避重试（最多 3 次请求）');
   store.clear();
   let n = 0;
   const realFetch = sandbox.fetch;

@@ -37,8 +37,13 @@
   const DEFAULT_NAME = '默认用户';   // 没填昵称就用这个
   const MUTE_MIN_GAP = 3000;        // 两次提交至少间隔 3 秒（防手抖）
   const MAX_SCORE = 99999999;       // 明显离谱的成绩直接不收
-  const SCAN_PAGES = 2;             // 扫最新两页（每页 100 条）
+  /* 只扫最新一页就够：服务端按提交时间倒序返回，一页 100 条 ≫ 窗口 30 条。
+     实测（2026-10 这个免费接口）：每次请求要 4~5 秒，而且第 2 页时不时 502 ——
+     多扫一页等于把延迟翻倍、还多一个会失败的请求，所以 SCAN_PAGES 固定 1。 */
+  const SCAN_PAGES = 1;
   const WINDOW = 30;                // 「最近 N 次提交」这个窗口的大小
+  const PAGE_SIZE = 100;            // 一页最多 100 条
+  const HTTP_TIMEOUT = 9000;        // 单次请求超时（这个接口能慢到 5 秒）
 
   const $ = (id) => document.getElementById(id);
 
@@ -55,23 +60,32 @@
     body.set('secret', SECRET);
     for (const k in params) body.set(k, params[k]);
 
-    const once = () => fetch(API, { method: 'POST', body: body }).then((res) => {
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      return res.text();
-    }).then((text) => {
-      const s = (text || '').trim();
-      if (!s) return {};
-      try {
-        return JSON.parse(s);
-      } catch (e) {
-        throw new Error('服务器返回看不懂：' + s.slice(0, 60));
-      }
-    });
+    const once = () => {
+      const ctl = (typeof AbortController === 'function') ? new AbortController() : null;
+      const timer = ctl ? setTimeout(() => ctl.abort(), HTTP_TIMEOUT) : 0;
+      const opt = { method: 'POST', body: body };
+      if (ctl) opt.signal = ctl.signal;
+      return fetch(API, opt).then((res) => {
+        if (timer) clearTimeout(timer);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.text();
+      }, (err) => {
+        if (timer) clearTimeout(timer);
+        throw (err && err.name === 'AbortError') ? new Error('请求超时（' + (HTTP_TIMEOUT / 1000) + ' 秒没响应）') : err;
+      }).then((text) => {
+        const s = (text || '').trim();
+        if (!s) return {};
+        try {
+          return JSON.parse(s);
+        } catch (e) {
+          throw new Error('服务器返回看不懂：' + s.slice(0, 60));
+        }
+      });
+    };
 
-    /* 这个免费接口时不时抽风返 502，歇一下重试一次再算失败 */
-    return once().catch((err) => new Promise((r) => setTimeout(r, 700)).then(once).catch(() => {
-      throw err;
-    }));
+    /* 这个免费接口时不时抽风返 502，歇一下重试两次再算失败（最多 3 次请求） */
+    const backoff = (ms) => new Promise((r) => setTimeout(r, ms));
+    return once().catch(() => backoff(600).then(once)).catch(() => backoff(1500).then(once));
   }
 
   function addScore(name, score) {
@@ -81,14 +95,14 @@
     return post({ action: 'update', tag: tag, value: value });
   }
 
-  /* 读榜：服务端按提交时间倒序返回，取最新 SCAN_PAGES 页就够覆盖最近 30 次提交 */
+  /* 读榜：服务端按提交时间倒序返回，最新一页（100 条）就够覆盖最近 30 次提交 */
   function searchRecent() {
     const out = {};
     let no = 1, page = 0;
 
     function step() {
       return post({
-        action: 'search', no: String(no), count: '100',
+        action: 'search', no: String(no), count: String(PAGE_SIZE),
         tag: PREFIX, type: 'both'
       }).then((obj) => {
         const keys = [];
@@ -98,7 +112,7 @@
         for (let i = 0; i < keys.length; i++) out[keys[i]] = obj[keys[i]];
         page++;
         if (page < SCAN_PAGES) {
-          no += 100;
+          no += PAGE_SIZE;
           return step();
         }
         return out;
@@ -254,13 +268,23 @@
     });
   }
 
+  /* 最近一次成功读到的榜单：这个接口每次要 4~5 秒，先拿它把界面填上，
+     再去后台刷新，免得开弹窗先看 5 秒「正在读取排行榜…」 */
+  let lastRows = null;
+
   function refreshBoard(myScore) {
-    boardMessage('正在读取排行榜…');
+    if (lastRows && lastRows.length) renderBoard(lastRows, myScore);
+    boardMessage(lastRows && lastRows.length ? '正在刷新…' : '正在读取排行榜…');
     return fetchTop().then((rows) => {
+      lastRows = rows;
       renderBoard(rows, myScore);
       return rows;
     }).catch((err) => {
-      boardMessage('读取失败：' + err.message + '（检查一下网络？）');
+      if (lastRows && lastRows.length) {
+        boardMessage('刷新失败：' + err.message + '（下面是上次读到的）');
+      } else {
+        boardMessage('读取失败：' + err.message + '（检查一下网络？）');
+      }
       throw err;
     });
   }
