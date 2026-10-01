@@ -68,6 +68,11 @@
   const SETTLE_WAKE   = 0.15;    // 连续动这么久 → 才取消“停下来了”（抗抖动）
   const SPAWN_TIMEOUT = 8;       // 保险：一直静不下来时，最多攒这么久也照样结算 + 放行
   const MAX_OWED      = 2;       // 没结算的“欠账”上限（防手快连甩把池子灌爆）
+  /* 连按不再被拒：按下方向键时，先把整池快进到「完全静止 + 欠的那批已经出现」，
+     再执行这次输入 —— 玩家不用等，手感是“按了立刻算完”。
+     最多快进 FASTFWD_MAX_SEC 秒（跑满就交给原来的超时放行逻辑，绝不卡死）。 */
+  const INSTANT_INPUT = true;
+  const FASTFWD_MAX_SEC = 4;
 
   const SWIPE_MIN      = 26;     // 触发滑动的最小位移（CSS px）
   const SWIPE_COOLDOWN = 0.12;   // 两次滑动的最小间隔（秒），防手抖
@@ -206,6 +211,11 @@
 
     spawn() { this.tone(520, 760, 0.09, 0.05, 'sine'); },
     deny()  { this.tone(150, 110, 0.14, 0.05, 'sine'); },
+    /* 快进：一记短促的「唰 —— 收」，表示时间被压过去了 */
+    warp()  {
+      this.tone(1180, 260, 0.16, 0.045, 'triangle');
+      this.tone(720, 170, 0.12, 0.03, 'sine');
+    },
     over()  { this.tone(420, 90, 0.7, 0.16, 'sawtooth'); },
     win()   { [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => this.tone(f, f, 0.22, 0.12, 'triangle'), i * 90)); },
     bonus() { [784, 988, 1175, 1568].forEach((f, i) => setTimeout(() => this.tone(f, f, 0.18, 0.1, 'square'), i * 80)); }
@@ -325,6 +335,9 @@
     danger: false,
     arrow: null,               // 滑动方向提示 {dir, life}
     denyFlash: 0,              // “还不能滑”的提示计时
+    warp: 0,                   // 刚快进过的提示（画个特效，见 drawWarp）
+    ffSteps: 0,                // 上一次快进推进了多少步（调试/自检用）
+    ffSettled: false,          // 上一次快进是不是真的到了「完全静止 + 欠账结清」
     denyText: '',
     locked: false,             // 还锁着吗（整池没停下来 / 这一轮还没完）
     shake: 0,
@@ -761,8 +774,18 @@
 
   function applySwipe(dir) {
     if (state.over || !DIRS[dir]) return false;
-    /* 只有整池都停下来了，才能做下一轮选择 —— 还在飞 / 上一轮的新奶蛙还没出来，滑了不算 */
-    if (state.locked) { denySwipe(); return false; }
+
+    /* —— 连按不再被拒 ——
+       以前整池没停下来时这一下会被丢掉（要等 1~2 秒，手感很糟）。
+       现在：先把整池**快进到完全静止**（顺手把欠的那一批新奶蛙结算出来），
+       然后立刻执行这次输入。所以“狂按”时的节奏完全由玩家决定。 */
+    const ff = INSTANT_INPUT ? fastForwardToRest() : 0;
+    if (state.over) return false;                       // 快进过程中判负了
+    if (ff > 4) { state.warp = 1; Sound.warp(); }       // 真的快进了一段才给提示音/特效
+
+    /* 唯一还会拒绝的情况：池子卡住了、4 秒都静不下来，而且欠账已经到顶 ——
+       再收就要把池子灌爆（这种情况本来也快判负了）。 */
+    if (state.locked && state.owed >= MAX_OWED) { denySwipe(); return false; }
 
     const first = !state.dir;
     setGravity(dir);
@@ -960,6 +983,9 @@
     state.arrow = null;
     state.denyFlash = 0;
     state.denyText = '';
+    state.warp = 0;
+    state.ffSteps = 0;
+    state.ffSettled = false;
     state.locked = false;
     state.shake = 0;
     state.flash = 0;
@@ -1003,8 +1029,8 @@
       if (!el) continue;
       if (state.dir === k) el.classList.add('on');
       else el.classList.remove('on');
-      /* 锁定期间方向键变淡（手机上的那一排方向键也一样） */
-      if (state.locked) el.classList.add('wait');
+      /* 只有真会被拒的时候才变淡（连按不再被拒，平时都是亮的） */
+      if (state.blocked) el.classList.add('wait');
       else el.classList.remove('wait');
       el.setAttribute('aria-pressed', String(state.dir === k));
     }
@@ -1027,26 +1053,28 @@
     if (footState) {
       let txt;
       if (state.over) txt = '本局结束';
-      else if (state.locked && state.owed > 0 && !state.rest) txt = '等奶蛙全停下…';
+      else if (state.blocked) txt = '池子卡住了 · 稍等一下';
+      else if (state.locked && state.owed > 0 && !state.rest) txt = '结算中…（按下即刻算完）';
       else if (state.locked && state.owed > 0) txt = '新奶蛙即将出现 ✨';
-      else if (state.locked) txt = '等奶蛙全停下…';
+      else if (state.locked) txt = '结算中…（按下即刻算完）';
       else txt = '可以滑了 → 选个方向';
       if (footState.textContent !== txt) footState.textContent = txt;
-      if (state.locked) footState.classList.add('waiting');
+      if (state.blocked) footState.classList.add('waiting');
       else footState.classList.remove('waiting');
     }
   }
 
-  /* 「下一个」下面的小字：说明它什么时候才出来 */
+  /* 「下一个」下面的小字：说明这一批什么时候出来 */
   function paintNextTip() {
     if (!nextTip) return;
     let txt;
     if (state.over) txt = '本局结束';
-    else if (state.locked && state.owed > 0) txt = '等奶蛙全停下 + 新奶蛙出现…';
-    else if (state.locked) txt = '等奶蛙全停下才能滑下一轮…';
+    else if (state.blocked) txt = '池子卡住了 · 下一批要等一下';
+    else if (state.locked && state.owed > 0) txt = '下一批马上到（按方向键会立刻算完）';
+    else if (state.locked) txt = '还在结算（按方向键会立刻算完）';
     else txt = '整池静止后一次出现 ' + SPAWN_PER_TURN + ' 只（漂着，不受重力）';
     if (nextTip.textContent !== txt) nextTip.textContent = txt;
-    if (state.locked) nextTip.classList.add('waiting');
+    if (state.blocked) nextTip.classList.add('waiting');
     else nextTip.classList.remove('waiting');
   }
 
@@ -1325,10 +1353,10 @@
     }
   }
 
-  /* 角上的重力罗盘（锁着的时候画成灰的 + 一圈虚环） */
+  /* 角上的重力罗盘（只有真会被拒的时候才画成灰的 + 一圈虚环） */
   function drawCompass() {
     const cx = W - WALL - 54, cy = WALL + 54, R0 = 27;
-    const locked = state.locked;
+    const locked = state.blocked;
 
     ctx.save();
     ctx.beginPath();
@@ -1586,7 +1614,9 @@
 
   let jamPaint = 0;
 
-  function update(dt) {
+  /* 把「一帧该算的东西」单独拆出来：主循环用它推进，快进也用它推进 ——
+     同一套代码，所以快进出来的结果和真等下去完全一样（只是瞬间算完）。 */
+  function simulate(dt) {
     if (state.over) return;
 
     if (state.swipeCd > 0) state.swipeCd = Math.max(0, state.swipeCd - dt);
@@ -1628,14 +1658,65 @@
     /* 什么时候才允许做下一轮选择：
        ① 上一滑欠的那批新奶蛙已经出现了；② 整池停下来了（或已经超时放行，绝不软锁） */
     state.locked = state.owed > 0 || (!state.rest && !giveUp);
+    /* 连按不会被拒（按下就先快进到静止），所以「变淡 / 等一等」这套视觉只在
+       真会拒的那一种情况下出现：池子卡住、欠账都顶到 MAX_OWED 了 */
+    state.blocked = state.locked && state.owed >= MAX_OWED;
 
     checkJam(dt);
     if (state.flash > 0) state.flash = Math.max(0, state.flash - dt * 2.2);
     if (state.shake > 0) state.shake = Math.max(0, state.shake - dt * 3.4);
+    if (state.warp > 0) state.warp = Math.max(0, state.warp - dt * 3.2);
+  }
+
+  /* 快进到「整池完全静止 + 欠的那批已经出现」，返回推进了多少步（0 = 本来就静止）。
+     上限 FASTFWD_MAX_SEC 秒：真卡住了就交给 SPAWN_TIMEOUT 那条超时放行的老路。 */
+  function fastForwardToRest() {
+    const STEP = 1 / 60;
+    const MAX = Math.ceil(FASTFWD_MAX_SEC / STEP);
+    let n = 0;
+    while (n < MAX && !state.over) {
+      if (state.rest && state.owed === 0) break;
+      simulate(STEP);
+      n++;
+    }
+    state.ffSteps = n;
+    state.ffSettled = !!(state.rest && state.owed === 0);
+    return n;
+  }
+
+  function update(dt) {
+    simulate(dt);
 
     /* 面板上的拥挤度不用每帧刷 DOM */
     jamPaint -= dt;
     if (jamPaint <= 0) { jamPaint = 0.12; paintJam(); paintGravity(); paintNextTip(); paintFoot(); }
+  }
+
+  /* 快进特效：一圈从中心往外冲的短划线，让人一眼看出“时间被压过去了”，
+     而不是以为奶蛙瞬移了 */
+  function drawWarp() {
+    const a = state.warp;
+    if (a <= 0) return;
+    const k = 1 - a;                        // 0 → 1
+    ctx.save();
+    ctx.globalAlpha = a * 0.55;
+    ctx.strokeStyle = 'rgba(47,168,125,.9)';
+    ctx.lineWidth = 2.5;
+    ctx.lineCap = 'round';
+    for (let i = 0; i < 16; i++) {
+      const ang = (i / 16) * Math.PI * 2 + k * 0.9;
+      const r0 = 70 + k * 90;
+      const r1 = r0 + 60 + k * 150;
+      ctx.beginPath();
+      ctx.moveTo(W / 2 + Math.cos(ang) * r0, H / 2 + Math.sin(ang) * r0);
+      ctx.lineTo(W / 2 + Math.cos(ang) * r1, H / 2 + Math.sin(ang) * r1);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = a * 0.22;
+    ctx.beginPath();
+    ctx.arc(W / 2, H / 2, 60 + k * 200, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
   }
 
   function render(dt) {
@@ -1650,6 +1731,7 @@
 
     drawBoard();
     drawFrogs();
+    drawWarp();
     drawArrowFlash(dt);
     drawEffects(dt);
     drawCompass();
@@ -1796,10 +1878,11 @@
   /* 调试句柄：__NW__.state / .reset() / .applySwipe('up') / .FROGS / .spawnFrog(3) */
   window.__NW__ = {
     state, reset, applySwipe, stepPhysics, makeBall, spawnFrog, dealInitial,
+    simulate, fastForwardToRest, INSTANT_INPUT, FASTFWD_MAX_SEC,
     Sound,                        // 宣传片录制页会把它静音，免得游戏音效和震动混进来
     FROGS, DIRS, coverageOf, coverageAll, checkJam, W, H, WALL,
     INIT_FROGS, MAX_TIER, MAX_BONUS, JAM_COV, JAM_LIMIT, FRICTION, CONTACT_PAD,
-    DAMPING, AIR_DAMP, SETTLE_SPEED, SETTLE_HOLD, SPAWN_TIMEOUT, MAX_OWED, SPAWN_PER_TURN,
+    DAMPING, AIR_DAMP, SETTLE_SPEED, SETTLE_HOLD, SPAWN_TIMEOUT, MAX_OWED, SPAWN_PER_TURN, MAX_FROGS,
     render, resizeCanvas, shapeOf, clampInside,
     update, gameOver, pickSpawnTier, findSpot, setGravity, dangerLine,
     allSettled, deliverSpawn

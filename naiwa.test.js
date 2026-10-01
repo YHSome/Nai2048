@@ -390,16 +390,24 @@ while (S.spawnCount === 0 && t7d < 12 * 60) { update(1 / 60); t7d++; }
 check('等它停下来之后才冒出', S.spawnCount === N.SPAWN_PER_TURN,
       '总计 ' + (t7d / 60).toFixed(2) + 's，冒出 ' + S.spawnCount + ' 只');
 
-/* 7e. 手快连甩：欠账封顶，不会灌爆池子（这里手动解锁来模拟“每一下都被接受”） */
+/* 7e. 连按：每一下都算一个回合（按下时先把整池快进到静止 + 结算，再执行输入），
+   所以再快也不会「丢输入」，欠账依然封顶，池子也不会被灌爆（有 MAX_FROGS 保险丝）。 */
 N.reset();
 clear();
 S.balls.push(ball(210, IN_Y1 - N.FROGS[3].r, 3));
 S.spawnCount = 0;
-for (let k = 0; k < 20; k++) { S.locked = false; N.applySwipe('down'); }   // 连甩 20 次
-check('连甩 20 次的欠账被封顶', S.owed <= N.MAX_OWED, 'owed = ' + S.owed);
-frames(600);                                          // 10 秒
-check('封顶后最多补几批', S.spawnCount <= N.MAX_OWED * N.SPAWN_PER_TURN,
-      '冒出 ' + S.spawnCount + ' 只（上限 ' + (N.MAX_OWED * N.SPAWN_PER_TURN) + '）');
+const PRESS = 5;
+for (let k = 0; k < PRESS; k++) N.applySwipe('down');      // 连按 5 下，中间不等
+check('连按的每一下都被接受（不再丢输入）', S.moves === PRESS, 'moves = ' + S.moves);
+check('每一下都先把整池快进到静止再执行', S.ffSteps > 0 && S.rest === false,
+      '最后一下快进了 ' + S.ffSteps + ' 步；滑完之后又要重新等静止（rest=' + S.rest + '）');
+check('欠账仍然封顶', S.owed <= N.MAX_OWED, 'owed = ' + S.owed);
+frames(600);                                               // 10 秒
+check('连按 ' + PRESS + ' 下 = 结算了 ' + PRESS + ' 批（每回合 3 只）',
+      S.spawnCount === PRESS * N.SPAWN_PER_TURN,
+      '冒出 ' + S.spawnCount + ' 只（期望 ' + (PRESS * N.SPAWN_PER_TURN) + '）');
+check('池子没被灌爆（MAX_FROGS 保险丝还在）', S.balls.length <= N.MAX_FROGS,
+      '场上 ' + S.balls.length + ' 只（上限 ' + N.MAX_FROGS + '）');
 
 /* 7e2. 一直狂甩（比静止判定还快）也必须照常出新奶蛙 ——
    之前滑动会把结算计时清零，狂甩的玩家永远等不到新的奶蛙 */
@@ -418,8 +426,8 @@ check('狂甩（每秒 10 次）也能收到新奶蛙', S.spawnCount > 0,
 check('狂甩时没有拖太久', tSpam / 60 <= N.SPAWN_TIMEOUT + 2,
       (tSpam / 60).toFixed(2) + 's（SPAWN_TIMEOUT = ' + N.SPAWN_TIMEOUT + 's）');
 
-/* ---- 7h. 只有整池停下才能做下一轮选择 ---- */
-console.log('[7h] 整池没停下 → 滑动（选择重力方向）无效');
+/* ---- 7h. 连按不再被拒：按下方向键先把整池快进到静止（顺手结算欠的那批），再执行输入 ---- */
+console.log('[7h] 连按不再被拒：按下时先快进到整池静止，再执行输入');
 N.reset();
 clear();
 const movingBall = ball(210, 100, 3);
@@ -427,32 +435,41 @@ movingBall.vy = 900;                                  // 正在飞
 S.balls.push(movingBall);
 S.moves = 0;
 update(1 / 60);                                       // 先让 update 算出 locked
-check('奶蛙还在飞 → 滑动被拒绝', N.applySwipe('left') === false && S.moves === 0 && S.dir === null,
-      'locked=' + S.locked + '，moves=' + S.moves);
-check('被拒时会给出提示（抖一下 + 文案）',
-      S.denyFlash > 0 && S.denyText.indexOf('停') > 0, 'denyText=「' + S.denyText + '」');
-check('被拒时方向不会变', S.dir === null && S.gx === 0 && S.gy === 0);
+check('前提：奶蛙还在飞，按老逻辑这一下会被丢掉', S.locked === true && !N.allSettled());
 
-let tWait = 0;
-while (S.locked && tWait < 15 * 60) { update(1 / 60); tWait++; }
-check('整池停下后自动解锁', S.locked === false, '等了 ' + (tWait / 60).toFixed(2) + 's');
-check('解锁后滑动被接受', N.applySwipe('left') === true && S.dir === 'left' && S.moves === 1);
-check('滑完立刻又锁上（进入下一轮）', S.locked === true);
+const spawnBeforePress = S.spawnCount;
+check('还在飞的时候按下方向键 → 被接受（不再丢输入）',
+      N.applySwipe('left') === true && S.moves === 1 && S.dir === 'left',
+      'moves=' + S.moves + '，dir=' + S.dir);
+check('接受之前确实快进到了完全静止（没有欠账时不会凭空冒奶蛙）',
+      S.ffSteps > 0 && S.ffSettled === true && S.spawnCount === spawnBeforePress,
+      '快进 ' + S.ffSteps + ' 步，ffSettled=' + S.ffSettled + '，新出 ' + (S.spawnCount - spawnBeforePress) + ' 只');
+check('没有走「拒绝」那条路（不抖、不提示）', S.denyFlash === 0 && S.denyText === '');
+check('这一次输入照常生效：方向变了、次数 +1、又进入下一轮',
+      S.dir === 'left' && S.moves === 1 && S.locked === true && S.owed === 1);
 
-/* 一轮走完之后（新奶蛙也出来了）才会再次解锁 */
+/* 连按：第二下也立刻接受，并且把上一回合欠的那批先结算掉 */
+const ballsBefore2 = S.balls.length;
+check('立刻再按一下也接受（第二回合）', N.applySwipe('up') === true && S.moves === 2 && S.dir === 'up',
+      'moves=' + S.moves + '，dir=' + S.dir);
+check('第二下之前把上一批结算出来了（每回合一批）',
+      S.balls.length === ballsBefore2 + N.SPAWN_PER_TURN,
+      '场上 ' + S.balls.length + ' 只（之前 ' + ballsBefore2 + ' 只）');
+
+/* 一轮走完之后（新奶蛙也出来了）状态照样能回到“静止” */
 let tWait2 = 0;
 while (S.locked && tWait2 < 15 * 60) { update(1 / 60); tWait2++; }
-check('新奶蛙出现 + 整池静止 → 又可以滑下一轮', S.locked === false && S.spawnCount === N.SPAWN_PER_TURN,
-      '等了 ' + (tWait2 / 60).toFixed(2) + 's，场上 ' + S.balls.length + ' 只');
+check('停下来之后照常解锁（状态机和以前一样）', S.locked === false,
+      '等了 ' + (tWait2 / 60).toFixed(2) + 's');
 
-/* 软锁保险：一直静不下来时也必须放行（不然玩家会卡死在那里） */
+/* 软锁保险：池子卡住、快进到上限都静不下来时，照样放行 / 只在那时才会拒 */
 N.reset();
 clear();
 const jitter = ball(210, 300, 2);
 jitter.vx = 200; jitter.vy = 200;                      // 永远“在动”
 S.balls.push(jitter);
-S.locked = true;
 let tLock = 0;
+N.applySwipe('right');                                 // 先正常滑一下，进入一轮
 while (S.locked && tLock < 30 * 60) {
   jitter.vx = 200; jitter.vy = 200;                    // 强行让它一直动
   update(1 / 60);
@@ -460,6 +477,8 @@ while (S.locked && tLock < 30 * 60) {
 }
 check('一直静不下来也会超时放行，不会软锁', S.locked === false && tLock < 30 * 60,
       '锁了 ' + (tLock / 60).toFixed(2) + 's（SPAWN_TIMEOUT = ' + N.SPAWN_TIMEOUT + 's）');
+check('快进有上限，不会无限算下去', S.ffSteps <= Math.ceil(N.FASTFWD_MAX_SEC * 60),
+      '最多快进 ' + S.ffSteps + ' 步（上限 ' + Math.ceil(N.FASTFWD_MAX_SEC * 60) + '）');
 
 /* 7i. 结算那一刻，场上必须真的全停了
    （曾经有个 bug：滑动后 rest 还残留着 true，下一帧就把新一批冒出来了，
@@ -584,29 +603,29 @@ check('向上滑 → 重力向上', S.dir === 'up', 'dir = ' + S.dir);
 fire(stage, 'pointerup', {});
 
 fire(stage, 'pointerdown', { clientX: 200, clientY: 400, pointerId: 2 });
-fire(stage, 'pointermove', { clientX: 320, clientY: 400 });      // 冷却中 + 本轮还没走完
+fire(stage, 'pointermove', { clientX: 320, clientY: 400 });      // 冷却中：同一次手势别重复触发
 check('两次滑动之间有冷却（不会一抖两下）', S.dir === 'up', 'dir = ' + S.dir);
 fire(stage, 'pointerup', {});
 frames(20);                                                      // 冷却结束
-check('还在飞的时候滑动依然无效', (fire(stage, 'pointerdown', { clientX: 200, clientY: 400, pointerId: 3 }),
-      fire(stage, 'pointermove', { clientX: 320, clientY: 400 }),
-      fire(stage, 'pointerup', {}), S.dir === 'up'), 'dir = ' + S.dir);
+check('冷却结束后立刻接着滑 → 接受，并且先把整池快进到静止',
+      (fire(stage, 'pointerdown', { clientX: 200, clientY: 400, pointerId: 3 }),
+       fire(stage, 'pointermove', { clientX: 320, clientY: 400 }),
+       fire(stage, 'pointerup', {}), S.dir === 'right'),
+      'dir = ' + S.dir);
 
 const w8 = waitUnlock(15);                                       // 等这一轮走完
 check('整池停下后解锁', S.locked === false, '等了 ' + w8.toFixed(2) + 's');
 fire(stage, 'pointerdown', { clientX: 200, clientY: 400, pointerId: 4 });
-fire(stage, 'pointermove', { clientX: 320, clientY: 400 });
-check('解锁后向右滑 → 重力向右', S.dir === 'right', 'dir = ' + S.dir);
+fire(stage, 'pointermove', { clientX: 200, clientY: 300 });
+check('再来一次 → 重力向上', S.dir === 'up', 'dir = ' + S.dir);
 fire(stage, 'pointerup', {});
 
 N.reset();
 winListeners.keydown({ code: 'ArrowUp', target: { tagName: 'BODY' }, preventDefault() {} });
 check('方向键 ↑ → 重力向上', S.dir === 'up');
 winListeners.keydown({ code: 'ArrowLeft', target: { tagName: 'BODY' }, preventDefault() {} });
-check('方向键在“还没停下”时也无效', S.dir === 'up', 'dir = ' + S.dir);
-waitUnlock(15);
-winListeners.keydown({ code: 'ArrowLeft', target: { tagName: 'BODY' }, preventDefault() {} });
-check('方向键 ← → 重力向左（解锁后）', S.dir === 'left', 'dir = ' + S.dir);
+check('方向键连按也立刻生效（快进到静止再执行）', S.dir === 'left' && S.moves === 2,
+      'dir = ' + S.dir + '，moves = ' + S.moves);
 waitUnlock(15);
 winListeners.keydown({ code: 'ArrowUp', target: { tagName: 'INPUT' }, preventDefault() {} });
 check('焦点在输入框里不抢按键', S.dir === 'left');
@@ -623,6 +642,13 @@ N.render(1 / 60);
 const drew = drawnImages.filter(d => d.ctx === 'game' && d.src).map(d => d.src);
 check('奶蛙贴图真的走 drawImage', drew.length >= N.INIT_FROGS, '本帧画了 ' + drew.length + ' 张贴图');
 check('画的是 assets/frogs/ 下的 11 张奶蛙', drew.every(s => s.indexOf('assets/frogs/') === 0));
+
+/* 快进特效（按下方向键那一下会画）别把渲染搞崩 */
+S.warp = 1;
+let warpThrew = false;
+try { for (let f = 0; f < 20; f++) { N.render(1 / 60); update(1 / 60); } } catch (e) { warpThrew = true; }
+check('快进特效从亮到灭都不报错', warpThrew === false && S.warp === 0,
+      '20 帧后 warp = ' + S.warp);
 
 /* 贴图缺失（加载失败/被删）时必须自动回退成程序化奶蛙，而不是白屏 */
 const savedImg = N.FROGS[0].img;
